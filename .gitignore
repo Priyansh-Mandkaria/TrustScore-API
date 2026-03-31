@@ -9,6 +9,7 @@ __pycache__/
 # Django
 db.sqlite3
 *.log
+.env
 
 # IDE
 .vscode/
