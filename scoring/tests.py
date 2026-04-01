@@ -1,8 +1,9 @@
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from .models import EvaluationRecord, RiskRule
-from .services import RiskScoringEngine
+from .services import RiskScoringEngine, RULES_CACHE_KEY
 
 
 class RiskScoringEngineTests(TestCase):
@@ -10,6 +11,7 @@ class RiskScoringEngineTests(TestCase):
 
     def setUp(self):
         """Create a standard set of rules for testing."""
+        cache.clear()
         RiskRule.objects.create(
             condition_field="account_age_days", operator="lt",
             threshold=7, deduction=20, description="New account",
@@ -84,6 +86,7 @@ class RiskScoringEngineTests(TestCase):
             condition_field="failed_logins", operator="gt",
             threshold=0, deduction=200, description="Extra harsh rule",
         )
+        cache.clear()  # Clear cache so new rule is picked up
         data = {
             "user_id": "U000",
             "account_age_days": 1,
@@ -99,6 +102,7 @@ class RiskScoringEngineTests(TestCase):
     def test_inactive_rule_ignored(self):
         """Inactive rules should not affect the score."""
         RiskRule.objects.all().update(is_active=False)
+        cache.clear()  # Clear cache so inactive status is picked up
         data = {
             "user_id": "U111",
             "account_age_days": 1,
@@ -117,6 +121,7 @@ class EvaluateUserViewTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        cache.clear()
         RiskRule.objects.create(
             condition_field="account_age_days", operator="lt",
             threshold=7, deduction=20, description="New account",
@@ -206,3 +211,153 @@ class UserHistoryViewTests(TestCase):
         response = self.client.get("/api/user-history/U999/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), [])
+
+
+class RulesCachingTests(TestCase):
+    """Tests for Redis caching of active risk rules."""
+
+    def setUp(self):
+        cache.clear()
+        self.rule = RiskRule.objects.create(
+            condition_field="account_age_days", operator="lt",
+            threshold=7, deduction=20, description="New account",
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_rules_are_cached_after_first_evaluate(self):
+        """After the first evaluation, rules should be in the cache."""
+        self.assertIsNone(cache.get(RULES_CACHE_KEY))
+
+        RiskScoringEngine.evaluate({
+            "user_id": "U1", "account_age_days": 365,
+            "failed_logins": 0, "transactions_last_24h": 0,
+            "ip_changes": 0, "avg_transaction_amount": 0,
+        })
+
+        cached = cache.get(RULES_CACHE_KEY)
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(cached[0]['description'], "New account")
+
+    def test_cache_invalidation(self):
+        """invalidate_rules_cache should clear the cached rules."""
+        # Populate cache
+        RiskScoringEngine.evaluate({
+            "user_id": "U1", "account_age_days": 365,
+            "failed_logins": 0, "transactions_last_24h": 0,
+            "ip_changes": 0, "avg_transaction_amount": 0,
+        })
+        self.assertIsNotNone(cache.get(RULES_CACHE_KEY))
+
+        # Invalidate
+        RiskScoringEngine.invalidate_rules_cache()
+        self.assertIsNone(cache.get(RULES_CACHE_KEY))
+
+    def test_new_rule_appears_after_cache_invalidation(self):
+        """After invalidating cache, new rules should be picked up."""
+        # Populate cache with 1 rule
+        RiskScoringEngine.evaluate({
+            "user_id": "U1", "account_age_days": 1,
+            "failed_logins": 0, "transactions_last_24h": 0,
+            "ip_changes": 0, "avg_transaction_amount": 0,
+        })
+        self.assertEqual(len(cache.get(RULES_CACHE_KEY)), 1)
+
+        # Add a new rule
+        RiskRule.objects.create(
+            condition_field="failed_logins", operator="gt",
+            threshold=3, deduction=15, description="Too many failed logins",
+        )
+
+        # Cache still shows 1 rule (stale)
+        self.assertEqual(len(cache.get(RULES_CACHE_KEY)), 1)
+
+        # After invalidation, both rules should load
+        RiskScoringEngine.invalidate_rules_cache()
+        RiskScoringEngine.evaluate({
+            "user_id": "U1", "account_age_days": 1,
+            "failed_logins": 5, "transactions_last_24h": 0,
+            "ip_changes": 0, "avg_transaction_amount": 0,
+        })
+        self.assertEqual(len(cache.get(RULES_CACHE_KEY)), 2)
+
+
+@override_settings(
+    REST_FRAMEWORK={
+        'DEFAULT_THROTTLE_CLASSES': [],
+        'DEFAULT_THROTTLE_RATES': {
+            'anon': '100/minute',
+            'user': '200/minute',
+            'evaluate': '3/minute',  # Very low limit for testing
+        },
+    }
+)
+class RateLimitingTests(TestCase):
+    """Tests for rate limiting on the evaluate endpoint."""
+
+    def setUp(self):
+        self.client = APIClient()
+        cache.clear()
+
+        # Set the throttle class's cached rate directly for testing
+        from .throttles import EvaluateRateThrottle
+        EvaluateRateThrottle.rate = '3/minute'
+        EvaluateRateThrottle.num_requests, EvaluateRateThrottle.duration = EvaluateRateThrottle().parse_rate(EvaluateRateThrottle.rate)
+
+        RiskRule.objects.create(
+            condition_field="account_age_days", operator="lt",
+            threshold=7, deduction=20, description="New account",
+        )
+        self.payload = {
+            "user_id": "U123",
+            "account_age_days": 365,
+            "failed_logins": 0,
+            "transactions_last_24h": 2,
+            "ip_changes": 0,
+            "avg_transaction_amount": 100,
+        }
+
+    def tearDown(self):
+        cache.clear()
+        # Reset throttle state after tests too
+        from .throttles import EvaluateRateThrottle
+        EvaluateRateThrottle.rate = None
+        EvaluateRateThrottle.num_requests = None
+        EvaluateRateThrottle.duration = None
+
+    def test_requests_within_limit_succeed(self):
+        """Requests within the rate limit should return 200."""
+        for _ in range(3):
+            response = self.client.post("/api/evaluate-user/", self.payload, format="json")
+            self.assertEqual(response.status_code, 200)
+
+    def test_request_exceeding_limit_returns_429(self):
+        """The 4th request within a minute should return 429 Too Many Requests."""
+        for _ in range(3):
+            self.client.post("/api/evaluate-user/", self.payload, format="json")
+
+        response = self.client.post("/api/evaluate-user/", self.payload, format="json")
+        self.assertEqual(response.status_code, 429)
+
+    def test_throttle_response_contains_retry_header(self):
+        """429 response should include a Retry-After header."""
+        for _ in range(3):
+            self.client.post("/api/evaluate-user/", self.payload, format="json")
+
+        response = self.client.post("/api/evaluate-user/", self.payload, format="json")
+        self.assertEqual(response.status_code, 429)
+        self.assertIn('Retry-After', response.headers)
+
+    def test_history_endpoint_not_throttled_by_evaluate(self):
+        """GET /user-history/ should not be affected by evaluate throttle."""
+        # Exhaust the evaluate limit
+        for _ in range(4):
+            self.client.post("/api/evaluate-user/", self.payload, format="json")
+
+        # History endpoint should still work
+        response = self.client.get("/api/user-history/U123/")
+        self.assertEqual(response.status_code, 200)
+
+

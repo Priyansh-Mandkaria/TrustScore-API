@@ -19,3 +19,8 @@ db.sqlite3
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Redis (portable Windows build)
+redis/
+redis-windows.zip
+dump.rdb

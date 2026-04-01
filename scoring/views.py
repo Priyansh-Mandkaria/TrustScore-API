@@ -9,6 +9,7 @@ from .serializers import (
     EvaluationResultSerializer,
 )
 from .services import RiskScoringEngine
+from .throttles import EvaluateRateThrottle
 
 
 class EvaluateUserView(APIView):
@@ -17,7 +18,11 @@ class EvaluateUserView(APIView):
 
     Accepts user activity data, evaluates it against active risk rules,
     stores the result, and returns the trust score breakdown.
+
+    Rate-limited to 60 requests/minute per IP (configurable via settings).
     """
+
+    throttle_classes = [EvaluateRateThrottle]
 
     def post(self, request):
         serializer = EvaluateUserSerializer(data=request.data)
