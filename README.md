@@ -1,26 +1,26 @@
-# 🛡️ TrustScore API
+# 🛡️ TrustScore API - Production Grade
 
 A **rule-based risk scoring engine** built with Django & Django REST Framework. Evaluates user behavior data against dynamic rules and calculates a trust score (0–100).
 
-> 🚀 **Live Demo:** [https://trustscore-api-3joi.onrender.com](https://trustscore-api-3joi.onrender.com)
+> 🚀 **Live Demo:** [https://trustscore-api-3joi.onrender.com](https://trustscore-api-3joi.onrender.com) (Legacy SQLite Version)
 
 ---
 
-## ✨ Features
+## ✨ Production Features
 
-- Accept user activity data and calculate a trust score
-- Dynamic risk rules stored in database — add/remove rules without code changes
-- Evaluation history stored for audit purposes
-- Clean architecture — scoring logic separated from views
-- Input validation and proper error handling
+This project has been heavily upgraded to support production workloads:
+- **MySQL Database Migration:** Replaced SQLite with robust, concurrent MySQL.
+- **Redis Caching:** Active risk rules are aggressively cached using Redis (with auto-invalidation bound to Django admin saves) to avoid high-volume DB lookups.
+- **API Rate Limiting:** DRF throttling applied limiting evaluation requests per IP/User to prevent abuse.
+- **Celery Async Scoring:** Added an asynchronous evaluation queue leveraging Celery + Redis so complex evaluations don't block web threads.
+- **Dockerized Stack:** Fully containerized using `docker-compose` containing `web`, `mysql`, `redis`, and `celery_worker` services.
 
 ---
 
 ## 📡 API Endpoints
 
-### `POST /api/evaluate-user/`
-
-Evaluate a user's risk based on their activity data.
+### `POST /api/evaluate-user/` (Synchronous)
+Evaluate a user's risk based on their activity data immediately. Rate-limited.
 
 **Request Body:**
 ```json
@@ -34,46 +34,44 @@ Evaluate a user's risk based on their activity data.
 }
 ```
 
+### `POST /api/evaluate-user-async/` (Asynchronous)
+Drop off a payload and receive a `task_id`. Let Celery process it in the background.
+
 **Response:**
 ```json
 {
-  "trust_score": 20,
-  "risk_level": "HIGH",
-  "flags": [
-    "New account",
-    "High failed login attempts",
-    "Unusual transaction volume",
-    "Suspicious IP changes",
-    "High average transaction amount"
-  ]
+  "task_id": "a92b21cf...",
+  "status": "QUEUED"
 }
 ```
 
-### `GET /api/user-history/{user_id}/`
-
-Retrieve evaluation history for a specific user.
-
-**Example:** `GET /api/user-history/U123/`
+### `GET /api/evaluation-status/<task_id>/`
+Retrieve the async evaluation result once complete.
 
 ---
 
-## 📊 Risk Rules (Default)
+## 🏗 System Architecture
 
-| Condition | Threshold | Deduction | Flag |
-|---|---|---|---|
-| Account age < 7 days | 7 | -20 | New account |
-| Failed logins > 3 | 3 | -15 | High failed login attempts |
-| Transactions > 20 in 24h | 20 | -20 | Unusual transaction volume |
-| IP changes > 2 | 2 | -10 | Suspicious IP changes |
-| Avg transaction > 5000 | 5000 | -15 | High average transaction amount |
-
-**Risk Levels:** 80–100 → LOW | 50–79 → MEDIUM | 0–49 → HIGH
-
-Rules are stored in the database and can be added/modified via Django Admin without changing code.
+```mermaid
+graph TD
+    Client((Client App)) --> |POST /api/evaluate| Nginx[Gunicorn / Web]
+    Client --> |POST /api/evaluate-async| Nginx
+    
+    Nginx --> API[Django API]
+    
+    API <--> |Rules Cache| Redis[(Redis Cache)]
+    API <--> |Read / Write| MySQL[(MySQL DB)]
+    
+    API --> |Queue Task| CeleryBroker[(Redis Broker)]
+    CeleryBroker --> Worker[Celery Worker]
+    Worker <--> |Write Eval| MySQL
+```
 
 ---
 
-## 🚀 Run Locally
+## 🐳 Quickstart: Docker Compose
+
+The fastest way to spin up the entire cluster locally:
 
 ### 1. Clone the repo
 ```bash
@@ -81,85 +79,57 @@ git clone https://github.com/Priyansh-Mandkaria/TrustScore-API.git
 cd TrustScore-API
 ```
 
-### 2. Create virtual environment
+### 2. Configure Environment
 ```bash
-python -m venv venv
-
-# Windows
-.\venv\Scripts\activate
-
-# Mac/Linux
-source venv/bin/activate
+cp docker.env.example .env
 ```
 
-### 3. Install dependencies
+### 3. Spin up the cluster
 ```bash
-pip install -r requirements.txt
+docker-compose up --build
 ```
+> This automatically builds the Python images, links them, boots MySQL and Redis, runs Django migrations automatically, and drops you into a unified log view. 
+> The API will be exposed on **`http://localhost:8000`**.
 
-### 4. Run migrations & seed rules
-```bash
-python manage.py migrate
-python manage.py seed_rules
-```
+---
 
-### 5. Start the server
-```bash
-python manage.py runserver
-```
+## 🚀 Deployment (Railway)
 
-The API is now running at `http://127.0.0.1:8000`
+We provide a custom `railway.toml` file to seamlessly build via `Dockerfile` and start the web component.
+1. Connect this repo to Railway.
+2. Provision a **MySQL Storage** and **Redis Storage** plugin inside your Railway project.
+3. Export their credentials to your Django service environment variables (`REDIS_URL`, `DB_HOST`, `DB_USER`, etc.).
+4. Add a secondary service using this same repo and set its Start Command to `celery -A trustscore worker --loglevel=info` to fire up your worker.
 
 ---
 
 ## 🧪 Run Tests
 
+We have 20 comprehensive unit tests that force-mock the Redis limits, stub out the DRF throttles, and force Celery execution securely. 
+
+*Inside the docker container, or your virtual env:*
 ```bash
 python manage.py test scoring -v2
 ```
-
-11 tests covering:
-- Scoring engine unit tests (low/medium/high risk, score clamping, inactive rules)
-- POST endpoint integration tests (success, validation errors)
-- GET history endpoint tests
 
 ---
 
 ## 📁 Project Structure
 
 ```
-├── manage.py
-├── requirements.txt
-├── Procfile                    # Render deployment
-├── build.sh                    # Render build script
-├── trustscore/                 # Django project config
-│   ├── settings.py
-│   ├── urls.py
-│   └── wsgi.py
-└── scoring/                    # Main app
-    ├── models.py               # RiskRule, EvaluationRecord
-    ├── services.py             # RiskScoringEngine
-    ├── serializers.py          # Input/output validation
-    ├── views.py                # API views
-    ├── urls.py                 # URL routing
-    ├── admin.py                # Django admin config
-    ├── tests.py                # Test suite
-    └── management/commands/
-        └── seed_rules.py       # Seed default rules
+├── docker-compose.yml          # Container topology
+├── Dockerfile                  # Python app image definition
+├── railway.toml                # Railway deployment config
+├── trustscore/                 # Django project config (settings with Celery)
+├── scoring/                    # Main app
+│   ├── tasks.py                # Celery async jobs
+│   ├── services.py             # RiskScoringEngine w/ Redis cache logic
+│   ├── throttles.py            # DRF Rate Limiter logic
+│   ├── admin.py                # Cache invalidation overrides
+│   ├── tests.py                # Comprehensive testing
 ```
 
 ---
 
-## 🛠️ Tech Stack
-
-- **Python 3.11+**
-- **Django 4.2**
-- **Django REST Framework 3.16**
-- **SQLite** (development) — swappable with PostgreSQL for production
-- **Gunicorn** (production WSGI server)
-
----
-
 ## 📄 License
-
 MIT
