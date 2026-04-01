@@ -1,0 +1,70 @@
+=========================================
+TRUSTSCORE API - INTERVIEW DEMO CHEATSHEET
+=========================================
+
+If an interviewer asks you to demonstrate the project, follow these steps using Postman:
+
+[STEP 1] Ensure Docker is Running
+In your terminal, make sure your containers are up:
+docker-compose up -d
+
+-----------------------------------------------------------
+
+[STEP 2] Test the Synchronous Endpoint
+This evaluates the user immediately and returns the score.
+
+METHOD: POST
+URL: http://localhost:8000/api/evaluate-user/
+HEADERS: Content-Type: application/json
+BODY (Raw JSON):
+{
+  "user_id": "INTERVIEWDEMO_001",
+  "account_age_days": 2,
+  "failed_logins": 5,
+  "transactions_last_24h": 45,
+  "ip_changes": 3,
+  "avg_transaction_amount": 8500
+}
+
+EXPECTED RESULT: 
+You should see a low trust score with flags like "New account" and "High failed login attempts".
+NOTE: If you spam this endpoint in Postman, you will get a "429 Too Many Requests" response. This perfectly demonstrates your REDIS RATE LIMITING!
+
+-----------------------------------------------------------
+
+[STEP 3] Test the Asynchronous Endpoint (Celery)
+This queues the evaluation in RabbitMQ/Redis and frees up the API immediately.
+
+METHOD: POST
+URL: http://localhost:8000/api/evaluate-user-async/
+HEADERS: Content-Type: application/json
+BODY (Raw JSON):
+{
+  "user_id": "INTERVIEWDEMO_002",
+  "account_age_days": 100,
+  "failed_logins": 0,
+  "transactions_last_24h": 2,
+  "ip_changes": 0,
+  "avg_transaction_amount": 50
+}
+
+EXPECTED RESULT (Status 202):
+{
+    "task_id": "d0f28c2e-4b95-46f9...",
+    "status": "QUEUED"
+}
+
+-----------------------------------------------------------
+
+[STEP 4] Fetch the Async Result
+Copy the "task_id" generated from Step 3, and paste it into this URL.
+
+METHOD: GET
+URL: http://localhost:8000/api/evaluation-status/<PASTE_TASK_ID_HERE>/
+
+EXPECTED RESULT:
+You will see the final calculated score (which should be very high/safe based on the clean data in Step 3), proving that the background Celery worker processed the task!
+
+-----------------------------------------------------------
+(Legacy Render Link if needed):
+https://trustscore-api-3joi.onrender.com/api/evaluate-user/
