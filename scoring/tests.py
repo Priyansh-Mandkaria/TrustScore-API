@@ -361,3 +361,69 @@ class RateLimitingTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_STORE_EAGER_RESULT=True)
+class EvaluateUserAsyncViewTests(TestCase):
+    """Integration tests for POST /api/evaluate-user-async/."""
+
+    def setUp(self):
+        self.client = APIClient()
+        cache.clear()
+        RiskRule.objects.create(
+            condition_field="account_age_days", operator="lt",
+            threshold=7, deduction=20, description="New account",
+        )
+        self.payload = {
+            "user_id": "UAsync1",
+            "account_age_days": 5,
+            "failed_logins": 0,
+            "transactions_last_24h": 0,
+            "ip_changes": 0,
+            "avg_transaction_amount": 100,
+        }
+
+    def test_evaluate_async_success(self):
+        """Valid data should queue a task and return a task ID."""
+        response = self.client.post("/api/evaluate-user-async/", self.payload, format="json")
+        self.assertEqual(response.status_code, 202)
+        data = response.json()
+        self.assertIn("task_id", data)
+        self.assertEqual(data["status"], "QUEUED")
+
+        # Because of ALWAYS_EAGER, the task already ran, creating a record.
+        self.assertEqual(EvaluationRecord.objects.count(), 1)
+
+
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_STORE_EAGER_RESULT=True)
+class EvaluationStatusViewTests(TestCase):
+    """Integration tests for GET /api/evaluation-status/<task_id>/."""
+
+    def setUp(self):
+        self.client = APIClient()
+        cache.clear()
+        self.payload = {
+            "user_id": "UAsync2",
+            "account_age_days": 365,
+            "failed_logins": 0,
+            "transactions_last_24h": 0,
+            "ip_changes": 0,
+            "avg_transaction_amount": 100,
+        }
+
+    def test_status_endpoint(self):
+        """Check the status of a queued task."""
+        # Queue the task
+        response1 = self.client.post("/api/evaluate-user-async/", self.payload, format="json")
+        task_id = response1.json()["task_id"]
+
+        # Check the status
+        response2 = self.client.get(f"/api/evaluation-status/{task_id}/")
+        self.assertEqual(response2.status_code, 200)
+        data = response2.json()
+        
+        self.assertEqual(data["task_id"], task_id)
+        # Because of ALWAYS_EAGER, the status is SUCCESS
+        self.assertEqual(data["status"], "SUCCESS")
+        self.assertIn("result", data)
+        self.assertEqual(data["result"]["trust_score"], 100)
+
+

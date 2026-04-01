@@ -58,3 +58,50 @@ class UserHistoryView(APIView):
         records = EvaluationRecord.objects.filter(user_id=user_id)
         serializer = EvaluationHistorySerializer(records, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+from celery.result import AsyncResult
+from .tasks import evaluate_user_async
+
+class EvaluateUserAsyncView(APIView):
+    """
+    POST /api/evaluate-user-async/
+
+    Accepts user activity data, queues it for background scoring,
+    and returns a task ID to check status later.
+    """
+
+    throttle_classes = [EvaluateRateThrottle]
+
+    def post(self, request):
+        serializer = EvaluateUserSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        validated = serializer.validated_data
+        task = evaluate_user_async.delay(validated)
+
+        return Response({"task_id": task.id, "status": "QUEUED"}, status=status.HTTP_202_ACCEPTED)
+
+
+class EvaluationStatusView(APIView):
+    """
+    GET /api/evaluation-status/<task_id>/
+
+    Check the status and result of a queued background evaluation.
+    """
+
+    def get(self, request, task_id):
+        result = AsyncResult(task_id)
+        
+        response_data = {
+            "task_id": task_id,
+            "status": result.status
+        }
+        
+        if result.ready():
+            if result.successful():
+                response_data["result"] = result.result
+            else:
+                response_data["error"] = str(result.result)
+                
+        return Response(response_data, status=status.HTTP_200_OK)

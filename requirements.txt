@@ -5,3 +5,4 @@ mysqlclient>=2.2
 python-dotenv>=1.0
 django-redis>=5.4
 redis>=5.0
+celery>=5.3
