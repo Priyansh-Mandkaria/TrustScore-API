@@ -1,0 +1,30 @@
+# Copy gitignore logic essentially
+.git
+.gitignore
+
+# Virtual environment
+venv/
+env/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local Database
+db.sqlite3
+
+# Local secrets
+.env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# Local Redis
+redis/
+redis-windows.zip
+dump.rdb

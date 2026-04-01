@@ -1,0 +1,74 @@
+services:
+  # 1. Redis Broker and Cache
+  redis:
+    image: redis:7-alpine
+    container_name: trustscore-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # 2. MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: trustscore-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-trustscore_db}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+      MYSQL_USER: ${DB_USER:-root}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-root}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # 3. Django Web API (Gunicorn)
+  web:
+    build: .
+    container_name: trustscore-web
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DB_ENGINE=mysql
+      - DB_HOST=mysql
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "python manage.py migrate && 
+             gunicorn trustscore.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+    restart: unless-stopped
+
+  # 4. Celery Task Worker
+  celery_worker:
+    build: .
+    container_name: trustscore-celery
+    env_file:
+      - .env
+    environment:
+      - DB_ENGINE=mysql
+      - DB_HOST=mysql
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: celery -A trustscore worker --loglevel=info
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
